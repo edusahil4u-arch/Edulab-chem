@@ -162,10 +162,14 @@ export function computeMoleculeMetrics(molecule: MoleculeGraph): MoleculeMetrics
     const implicitH =
       atom.explicitH !== undefined
         ? atom.explicitH
+        : spec.isMetal || spec.category === 'noble_gas'
+        ? 0
         : Math.max(0, targetValence - roundedBondSum);
     const maxAllowedValence =
       atom.element === 'N' && charge === 1
         ? 4
+        : spec.isMetal
+        ? Math.max(8, ...spec.standardValences)
         : Math.max(...spec.standardValences);
     const valenceValid = roundedBondSum <= maxAllowedValence;
 

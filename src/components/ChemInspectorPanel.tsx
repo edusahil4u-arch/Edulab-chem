@@ -27,22 +27,32 @@ interface ChemInspectorPanelProps {
   molecule: MoleculeGraph;
   metrics: MoleculeMetrics;
   selectedAtomId: string | null;
+  selectedBondId?: string | null;
+  selectedLonePair?: { atomId: string; lobeIndex: number } | null;
   analysis: DeepStructureAnalysis | null;
   isAnalyzing: boolean;
   analysisError: string | null;
   onRunDeepAnalysis: () => Promise<void>;
   onSelectAtom: (atomId: string | null) => void;
+  onSelectBond?: (bondId: string | null) => void;
+  onCycleBondOrder?: (bondId: string) => void;
+  onDeleteBond?: (bondId: string) => void;
 }
 
 export const ChemInspectorPanel: React.FC<ChemInspectorPanelProps> = ({
   molecule,
   metrics,
   selectedAtomId,
+  selectedBondId,
+  selectedLonePair,
   analysis,
   isAnalyzing,
   analysisError,
   onRunDeepAnalysis,
   onSelectAtom,
+  onSelectBond,
+  onCycleBondOrder,
+  onDeleteBond,
 }) => {
   const [quickHint, setQuickHint] = useState<{
     atomId: string;
@@ -58,6 +68,24 @@ export const ChemInspectorPanel: React.FC<ChemInspectorPanelProps> = ({
   const selectedAnalysis = selectedAtomId
     ? metrics.atomAnalyses[selectedAtomId] ?? null
     : null;
+
+  const selectedBond = selectedBondId
+    ? molecule.bonds.find((b) => b.id === selectedBondId) ?? null
+    : null;
+  const bondAtomA = selectedBond
+    ? molecule.atoms.find((a) => a.id === selectedBond.from)
+    : null;
+  const bondAtomB = selectedBond
+    ? molecule.atoms.find((a) => a.id === selectedBond.to)
+    : null;
+  const bondLength =
+    bondAtomA && bondAtomB
+      ? Math.hypot(
+          bondAtomA.x3d - bondAtomB.x3d,
+          bondAtomA.y3d - bondAtomB.y3d,
+          bondAtomA.z3d - bondAtomB.z3d
+        ).toFixed(3)
+      : null;
 
   const handleFetchQuickHint = async () => {
     if (!selectedAtom || !selectedAnalysis) return;
@@ -133,6 +161,93 @@ export const ChemInspectorPanel: React.FC<ChemInspectorPanelProps> = ({
             </span>
           </div>
         ) : null}
+
+        {/* Selected Bond Card */}
+        {selectedBond && bondAtomA && bondAtomB && (
+          <section className="p-3.5 rounded-lg border border-cyan-200 bg-cyan-50/40 space-y-2.5">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <span className="w-2.5 h-2.5 rounded-full bg-cyan-500 animate-pulse" />
+                <h3 className="text-xs font-semibold text-slate-900">
+                  Selected Bond: {bondAtomA.element}
+                  {selectedBond.order === 3 ? ' ≡ ' : selectedBond.order === 2 ? ' = ' : ' — '}
+                  {bondAtomB.element}
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => onSelectBond?.(null)}
+                className="text-[11px] font-medium text-slate-500 hover:text-slate-800"
+              >
+                Clear
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs pt-1 border-t border-cyan-200/70">
+              <div className="flex justify-between">
+                <span className="text-slate-500">Order</span>
+                <span className="font-mono font-semibold text-slate-900">
+                  {selectedBond.order === 1
+                    ? 'Single (1)'
+                    : selectedBond.order === 2
+                    ? 'Double (2)'
+                    : 'Triple (3)'}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-500">Length</span>
+                <span className="font-mono font-semibold text-slate-900 tabular-nums">
+                  {bondLength} Å
+                </span>
+              </div>
+              <div className="col-span-2 flex justify-between">
+                <span className="text-slate-500">Stereo / Aromatic</span>
+                <span className="font-mono text-slate-700">
+                  {selectedBond.isAromatic
+                    ? 'Aromatic Ring Bond'
+                    : selectedBond.stereo
+                    ? selectedBond.stereo.toUpperCase()
+                    : 'Standard Covalent'}
+                </span>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => onCycleBondOrder?.(selectedBond.id)}
+                className="flex-1 py-1.5 px-2.5 rounded-md bg-blue-600 hover:bg-blue-700 text-white text-xs font-medium flex items-center justify-center gap-1 transition-colors cursor-pointer"
+              >
+                <span>Cycle Order (1↔2↔3)</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => onDeleteBond?.(selectedBond.id)}
+                className="py-1.5 px-2.5 rounded-md bg-rose-50 hover:bg-rose-100 text-rose-700 text-xs font-medium border border-rose-200 transition-colors cursor-pointer"
+              >
+                Delete Bond
+              </button>
+            </div>
+          </section>
+        )}
+
+        {/* Selected Lone Pair Card */}
+        {selectedLonePair && (
+          <section className="p-3.5 rounded-lg border border-purple-200 bg-purple-50/40 space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <h3 className="text-xs font-semibold text-purple-900 flex items-center gap-1.5">
+                <span className="w-2.5 h-2.5 rounded-full bg-purple-500" />
+                <span>Lone Pair #{selectedLonePair.lobeIndex + 1}</span>
+              </h3>
+              <span className="text-[10px] font-mono font-semibold px-2 py-0.5 rounded bg-purple-100 text-purple-800">
+                2e⁻ Non-Bonding
+              </span>
+            </div>
+            <p className="text-xs text-purple-900/80 leading-relaxed">
+              Localized pair of valence electrons not shared with another atom. Contributes to VSEPR steric number, dipole moment, and Lewis base reactivity.
+            </p>
+          </section>
+        )}
 
         {/* Selected Atom VSEPR Inspector */}
         {selectedAtom && selectedAnalysis && (

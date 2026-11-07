@@ -1,16 +1,27 @@
 export type ElementSymbol =
-  | 'H'
-  | 'B'
-  | 'C'
-  | 'N'
-  | 'O'
-  | 'F'
-  | 'Si'
-  | 'P'
-  | 'S'
-  | 'Cl'
-  | 'Br'
-  | 'I';
+  | 'H'  | 'He'
+  | 'Li' | 'Be' | 'B'  | 'C'  | 'N'  | 'O'  | 'F'  | 'Ne'
+  | 'Na' | 'Mg' | 'Al' | 'Si' | 'P'  | 'S'  | 'Cl' | 'Ar'
+  | 'K'  | 'Ca' | 'Sc' | 'Ti' | 'V'  | 'Cr' | 'Mn' | 'Fe' | 'Co' | 'Ni' | 'Cu' | 'Zn' | 'Ga' | 'Ge' | 'As' | 'Se' | 'Br' | 'Kr'
+  | 'Rb' | 'Sr' | 'Y'  | 'Zr' | 'Nb' | 'Mo' | 'Tc' | 'Ru' | 'Rh' | 'Pd' | 'Ag' | 'Cd' | 'In' | 'Sn' | 'Sb' | 'Te' | 'I'  | 'Xe'
+  | 'Cs' | 'Ba'
+  | 'La' | 'Ce' | 'Pr' | 'Nd' | 'Pm' | 'Sm' | 'Eu' | 'Gd' | 'Tb' | 'Dy' | 'Ho' | 'Er' | 'Tm' | 'Yb' | 'Lu'
+  | 'Hf' | 'Ta' | 'W'  | 'Re' | 'Os' | 'Ir' | 'Pt' | 'Au' | 'Hg' | 'Tl' | 'Pb' | 'Bi' | 'Po' | 'At' | 'Rn'
+  | 'Fr' | 'Ra'
+  | 'Ac' | 'Th' | 'Pa' | 'U'  | 'Np' | 'Pu' | 'Am' | 'Cm' | 'Bk' | 'Cf' | 'Es' | 'Fm' | 'Md' | 'No' | 'Lr'
+  | 'Rf' | 'Db' | 'Sg' | 'Bh' | 'Hs' | 'Mt' | 'Ds' | 'Rg' | 'Cn' | 'Nh' | 'Fl' | 'Mc' | 'Lv' | 'Ts' | 'Og';
+
+export type ElementCategory =
+  | 'nonmetal'
+  | 'noble_gas'
+  | 'alkali_metal'
+  | 'alkaline_earth'
+  | 'metalloid'
+  | 'halogen'
+  | 'post_transition'
+  | 'transition_metal'
+  | 'lanthanide'
+  | 'actinide';
 
 export type BondOrder = 1 | 2 | 3;
 
@@ -32,6 +43,12 @@ export interface ElementSpec {
   name: string;
   atomicNumber: number;
   atomicMass: number;
+  period: number;
+  group: number;
+  gridRow: number;
+  gridCol: number;
+  category: ElementCategory;
+  isMetal?: boolean;
   cpkColor: string;
   cpkTextColor: string;
   covalentRadius: number; // in Angstroms

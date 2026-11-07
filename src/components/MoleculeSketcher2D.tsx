@@ -1,6 +1,6 @@
-import React, { useMemo, useRef, useState } from 'react';
 import {
   Atom,
+  Download,
   Eraser,
   FlipHorizontal,
   Grid,
@@ -8,12 +8,14 @@ import {
   MousePointer,
   Redo2,
   Sparkles,
+  Table2,
   Trash2,
   Undo2,
 } from 'lucide-react';
 import { ELEMENT_PALETTE_ORDER, ELEMENTS } from '../chem/elements';
 import { FRAGMENT_TEMPLATES } from '../chem/presets';
 import { parseSmilesToMolecule } from '../chem/chemistry';
+import { PeriodicTablePicker } from './PeriodicTablePicker';
 import type {
   AtomNode,
   BondEdge,
@@ -80,6 +82,34 @@ const CHEMDRAW_ATOM_COLOR: Partial<Record<ElementSymbol, string>> = {
   B: '#B45309',
   Si: '#92400E',
 };
+
+function getChemDrawTextColor(sym: ElementSymbol): string {
+  const direct = CHEMDRAW_ATOM_COLOR[sym];
+  if (direct) return direct;
+  const category = ELEMENTS[sym]?.category;
+  switch (category) {
+    case 'alkali_metal':
+      return '#BE123C';
+    case 'alkaline_earth':
+      return '#B45309';
+    case 'transition_metal':
+      return '#9A3412';
+    case 'post_transition':
+      return '#334155';
+    case 'metalloid':
+      return '#0F766E';
+    case 'halogen':
+      return '#047857';
+    case 'noble_gas':
+      return '#1D4ED8';
+    case 'lanthanide':
+      return '#6D28D9';
+    case 'actinide':
+      return '#86198F';
+    default:
+      return '#0369A1';
+  }
+}
 
 function isRingTool(tool: ChemDrawTool): boolean {
   return (
@@ -239,6 +269,7 @@ export const MoleculeSketcher2D: React.FC<MoleculeSketcher2DProps> = ({
   const svgRef = useRef<SVGSVGElement | null>(null);
   const [activeElement, setActiveElement] = useState<ElementSymbol>('C');
   const [atomStampMode, setAtomStampMode] = useState<boolean>(false);
+  const [showPeriodicTable, setShowPeriodicTable] = useState<boolean>(false);
   const [tool, setTool] = useState<ChemDrawTool>('bond1');
   const [showGrid, setShowGrid] = useState<boolean>(true);
   const [aromaticCircleStyle, setAromaticCircleStyle] =
@@ -1344,38 +1375,69 @@ export const MoleculeSketcher2D: React.FC<MoleculeSketcher2DProps> = ({
   const selectBondTool = (nextTool: ChemDrawTool) => {
     setTool(nextTool);
     setAtomStampMode(false);
+    setShowPeriodicTable(false);
+  };
+
+  const selectShapeOrUtilityTool = (nextTool: ChemDrawTool) => {
+    setTool(nextTool);
+    setShowPeriodicTable(false);
+
+    // If an atom is currently selected, clicking + or - immediately applies the charge delta
+    if (nextTool === 'charge_plus' || nextTool === 'charge_minus') {
+      const targetId = selectedAtomId;
+      if (targetId) {
+        const targetAtom = molecule.atoms.find((a) => a.id === targetId);
+        if (targetAtom) {
+          const delta = nextTool === 'charge_plus' ? 1 : -1;
+          const nextCharge = Math.max(
+            -3,
+            Math.min(3, (targetAtom.formalCharge ?? 0) + delta)
+          );
+          onChangeMolecule({
+            ...molecule,
+            smiles: undefined,
+            atoms: molecule.atoms.map((a) =>
+              a.id === targetId ? { ...a, formalCharge: nextCharge } : a
+            ),
+          });
+        }
+      }
+    }
+  };
+
+  const handleSelectElement = (sym: ElementSymbol) => {
+    setActiveElement(sym);
+    setAtomStampMode(true);
+    setShowPeriodicTable(false);
+    if (isRingTool(tool) || tool === 'select' || tool === 'erase') {
+      setTool('bond1');
+    }
+    if (selectedAtomId) {
+      onChangeMolecule({
+        ...molecule,
+        smiles: undefined,
+        atoms: molecule.atoms.map((a) =>
+          a.id === selectedAtomId ? { ...a, element: sym } : a
+        ),
+      });
+    }
   };
 
   return (
     <div className="flex flex-col h-full bg-white border border-slate-200 rounded-xl shadow-xs overflow-hidden select-none">
       {/* Top Bar 1: Element Palette + Document Actions */}
       <div className="px-3 py-2 border-b border-slate-200 bg-slate-50/70 flex flex-wrap items-center justify-between gap-2">
-        {/* Element Hotkey Buttons */}
+        {/* Element Hotkey Buttons + Periodic Table List Trigger */}
         <div className="flex flex-wrap items-center gap-1">
           {ELEMENT_PALETTE_ORDER.map((sym) => {
             const spec = ELEMENTS[sym];
             const active = activeElement === sym && atomStampMode;
-            const textColor = CHEMDRAW_ATOM_COLOR[sym] ?? '#0F172A';
+            const textColor = getChemDrawTextColor(sym);
             return (
               <button
                 key={sym}
                 type="button"
-                onClick={() => {
-                  setActiveElement(sym);
-                  setAtomStampMode(true);
-                  if (isRingTool(tool) || tool === 'select' || tool === 'erase') {
-                    setTool('bond1');
-                  }
-                  if (selectedAtomId) {
-                    onChangeMolecule({
-                      ...molecule,
-                      smiles: undefined,
-                      atoms: molecule.atoms.map((a) =>
-                        a.id === selectedAtomId ? { ...a, element: sym } : a
-                      ),
-                    });
-                  }
-                }}
+                onClick={() => handleSelectElement(sym)}
                 aria-label={`Element ${spec.name} (${sym})`}
                 aria-pressed={active}
                 title={`${spec.name} (${sym}) — Click to stamp or transmute selected atom`}
@@ -1390,6 +1452,49 @@ export const MoleculeSketcher2D: React.FC<MoleculeSketcher2DProps> = ({
               </button>
             );
           })}
+
+          {!ELEMENT_PALETTE_ORDER.includes(activeElement) && (
+            <button
+              type="button"
+              onClick={() => handleSelectElement(activeElement)}
+              aria-label={`Element ${ELEMENTS[activeElement]?.name ?? activeElement} (${activeElement})`}
+              aria-pressed={atomStampMode}
+              title={`#${ELEMENTS[activeElement]?.atomicNumber ?? ''} ${
+                ELEMENTS[activeElement]?.name ?? activeElement
+              } (${activeElement}) — Click to stamp or transmute selected atom`}
+              className={`h-7 px-2 rounded text-xs font-bold font-mono flex items-center gap-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                atomStampMode
+                  ? 'bg-slate-900 text-white'
+                  : 'bg-blue-50 border border-blue-300 text-blue-900'
+              }`}
+              style={
+                atomStampMode
+                  ? undefined
+                  : { color: getChemDrawTextColor(activeElement) }
+              }
+            >
+              <span className="text-[9.5px] opacity-75">
+                {ELEMENTS[activeElement]?.atomicNumber}
+              </span>
+              <span>{activeElement}</span>
+            </button>
+          )}
+
+          <button
+            type="button"
+            onClick={() => setShowPeriodicTable((v) => !v)}
+            aria-label="Open Periodic Table List"
+            aria-expanded={showPeriodicTable}
+            title="Open 118-Element Periodic Table List & Grid"
+            className={`h-7 px-2 rounded border text-xs font-semibold flex items-center gap-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+              showPeriodicTable
+                ? 'bg-blue-600 border-blue-600 text-white shadow-xs'
+                : 'bg-white border-slate-200 text-slate-700 hover:border-slate-400 hover:text-slate-900'
+            }`}
+          >
+            <Table2 className="w-3.5 h-3.5" />
+            <span>Periodic Table</span>
+          </button>
         </div>
 
         {/* Document Edit & Display Actions */}
@@ -1498,22 +1603,44 @@ export const MoleculeSketcher2D: React.FC<MoleculeSketcher2DProps> = ({
       </div>
 
       {/* Main Editor Body: Left Vertical ChemDraw Tool Dock + White Drafting Sheet */}
-      <div className="flex-1 flex min-h-[260px] max-h-[340px] sm:max-h-none overflow-hidden">
+      <div
+        className={`flex-1 flex sm:max-h-none overflow-hidden ${
+          showPeriodicTable
+            ? 'min-h-[380px] max-h-[440px]'
+            : 'min-h-[260px] max-h-[340px]'
+        }`}
+      >
         {/* Classic ChemDraw / MolDraw Left Vertical Palette */}
         <div
           role="toolbar"
           aria-label="ChemDraw Structure Drawing Tools"
           className="w-11 border-r border-slate-200 bg-slate-50/80 py-2 px-1 flex flex-col items-center gap-1 overflow-y-auto shrink-0"
         >
+          {/* Periodic Table Element List Tool */}
+          <button
+            type="button"
+            onClick={() => setShowPeriodicTable((v) => !v)}
+            aria-label="Periodic Table Tool"
+            aria-pressed={showPeriodicTable}
+            title="Periodic Table List (118 Elements) — Browse & pick any atom"
+            className={`w-8 h-8 rounded-md flex items-center justify-center transition-colors cursor-pointer ${
+              showPeriodicTable
+                ? 'bg-blue-600 text-white shadow-xs'
+                : 'text-slate-700 hover:bg-slate-200/70'
+            }`}
+          >
+            <Table2 className="w-4 h-4" />
+          </button>
+
           {/* Select / Move / Pan */}
           <button
             type="button"
-            onClick={() => setTool('select')}
+            onClick={() => selectShapeOrUtilityTool('select')}
             aria-label="Select and Move"
-            aria-pressed={tool === 'select'}
+            aria-pressed={!showPeriodicTable && tool === 'select'}
             title="Select, Move Atom, or Drag Sheet"
             className={`w-8 h-8 rounded-md flex items-center justify-center transition-colors cursor-pointer ${
-              tool === 'select'
+              !showPeriodicTable && tool === 'select'
                 ? 'bg-blue-600 text-white shadow-xs'
                 : 'text-slate-700 hover:bg-slate-200/70'
             }`}
@@ -1641,12 +1768,12 @@ export const MoleculeSketcher2D: React.FC<MoleculeSketcher2DProps> = ({
           {/* Polygon Ring Tools (3, 4, 5, 6, Benzene, 7) */}
           <button
             type="button"
-            onClick={() => setTool('ring3')}
+            onClick={() => selectShapeOrUtilityTool('ring3')}
             aria-label="Cyclopropane Ring"
-            aria-pressed={tool === 'ring3'}
+            aria-pressed={!showPeriodicTable && tool === 'ring3'}
             title="Cyclopropane (3-Ring) — Click sheet or click bond to fuse"
             className={`w-8 h-8 rounded-md flex items-center justify-center transition-colors cursor-pointer ${
-              tool === 'ring3'
+              !showPeriodicTable && tool === 'ring3'
                 ? 'bg-blue-600 text-white shadow-xs'
                 : 'text-slate-700 hover:bg-slate-200/70'
             }`}
@@ -1658,12 +1785,12 @@ export const MoleculeSketcher2D: React.FC<MoleculeSketcher2DProps> = ({
 
           <button
             type="button"
-            onClick={() => setTool('ring4')}
+            onClick={() => selectShapeOrUtilityTool('ring4')}
             aria-label="Cyclobutane Ring"
-            aria-pressed={tool === 'ring4'}
+            aria-pressed={!showPeriodicTable && tool === 'ring4'}
             title="Cyclobutane (4-Ring) — Click sheet or click bond to fuse"
             className={`w-8 h-8 rounded-md flex items-center justify-center transition-colors cursor-pointer ${
-              tool === 'ring4'
+              !showPeriodicTable && tool === 'ring4'
                 ? 'bg-blue-600 text-white shadow-xs'
                 : 'text-slate-700 hover:bg-slate-200/70'
             }`}
@@ -1675,12 +1802,12 @@ export const MoleculeSketcher2D: React.FC<MoleculeSketcher2DProps> = ({
 
           <button
             type="button"
-            onClick={() => setTool('ring5')}
+            onClick={() => selectShapeOrUtilityTool('ring5')}
             aria-label="Cyclopentane Ring"
-            aria-pressed={tool === 'ring5'}
+            aria-pressed={!showPeriodicTable && tool === 'ring5'}
             title="Cyclopentane (5-Ring) — Click sheet or click bond to fuse"
             className={`w-8 h-8 rounded-md flex items-center justify-center transition-colors cursor-pointer ${
-              tool === 'ring5'
+              !showPeriodicTable && tool === 'ring5'
                 ? 'bg-blue-600 text-white shadow-xs'
                 : 'text-slate-700 hover:bg-slate-200/70'
             }`}
@@ -1692,12 +1819,12 @@ export const MoleculeSketcher2D: React.FC<MoleculeSketcher2DProps> = ({
 
           <button
             type="button"
-            onClick={() => setTool('ring6')}
+            onClick={() => selectShapeOrUtilityTool('ring6')}
             aria-label="Cyclohexane Ring"
-            aria-pressed={tool === 'ring6'}
+            aria-pressed={!showPeriodicTable && tool === 'ring6'}
             title="Cyclohexane (6-Ring) — Click sheet or click bond to fuse"
             className={`w-8 h-8 rounded-md flex items-center justify-center transition-colors cursor-pointer ${
-              tool === 'ring6'
+              !showPeriodicTable && tool === 'ring6'
                 ? 'bg-blue-600 text-white shadow-xs'
                 : 'text-slate-700 hover:bg-slate-200/70'
             }`}
@@ -1709,12 +1836,12 @@ export const MoleculeSketcher2D: React.FC<MoleculeSketcher2DProps> = ({
 
           <button
             type="button"
-            onClick={() => setTool('benzene')}
+            onClick={() => selectShapeOrUtilityTool('benzene')}
             aria-label="Benzene Ring"
-            aria-pressed={tool === 'benzene'}
+            aria-pressed={!showPeriodicTable && tool === 'benzene'}
             title="Benzene Aromatic Ring — Click sheet or click bond to fuse"
             className={`w-8 h-8 rounded-md flex items-center justify-center transition-colors cursor-pointer ${
-              tool === 'benzene'
+              !showPeriodicTable && tool === 'benzene'
                 ? 'bg-blue-600 text-white shadow-xs'
                 : 'text-slate-700 hover:bg-slate-200/70'
             }`}
@@ -1727,12 +1854,12 @@ export const MoleculeSketcher2D: React.FC<MoleculeSketcher2DProps> = ({
 
           <button
             type="button"
-            onClick={() => setTool('ring7')}
+            onClick={() => selectShapeOrUtilityTool('ring7')}
             aria-label="Cycloheptane Ring"
-            aria-pressed={tool === 'ring7'}
+            aria-pressed={!showPeriodicTable && tool === 'ring7'}
             title="Cycloheptane (7-Ring) — Click sheet or click bond to fuse"
             className={`w-8 h-8 rounded-md flex items-center justify-center transition-colors cursor-pointer ${
-              tool === 'ring7'
+              !showPeriodicTable && tool === 'ring7'
                 ? 'bg-blue-600 text-white shadow-xs'
                 : 'text-slate-700 hover:bg-slate-200/70'
             }`}
@@ -1747,12 +1874,12 @@ export const MoleculeSketcher2D: React.FC<MoleculeSketcher2DProps> = ({
           {/* Formal Charge +1 / -1 & Eraser */}
           <button
             type="button"
-            onClick={() => setTool('charge_plus')}
+            onClick={() => selectShapeOrUtilityTool('charge_plus')}
             aria-label="Positive Formal Charge"
-            aria-pressed={tool === 'charge_plus'}
+            aria-pressed={!showPeriodicTable && tool === 'charge_plus'}
             title="Add +1 Formal Charge to Atom"
             className={`w-8 h-8 rounded-md font-mono text-xs font-bold flex items-center justify-center transition-colors cursor-pointer ${
-              tool === 'charge_plus'
+              !showPeriodicTable && tool === 'charge_plus'
                 ? 'bg-slate-900 text-white'
                 : 'text-slate-700 hover:bg-slate-200/70'
             }`}
@@ -1762,12 +1889,12 @@ export const MoleculeSketcher2D: React.FC<MoleculeSketcher2DProps> = ({
 
           <button
             type="button"
-            onClick={() => setTool('charge_minus')}
+            onClick={() => selectShapeOrUtilityTool('charge_minus')}
             aria-label="Negative Formal Charge"
-            aria-pressed={tool === 'charge_minus'}
+            aria-pressed={!showPeriodicTable && tool === 'charge_minus'}
             title="Add -1 Formal Charge to Atom"
             className={`w-8 h-8 rounded-md flex items-center justify-center transition-colors cursor-pointer ${
-              tool === 'charge_minus'
+              !showPeriodicTable && tool === 'charge_minus'
                 ? 'bg-slate-900 text-white'
                 : 'text-slate-700 hover:bg-slate-200/70'
             }`}
@@ -1777,12 +1904,12 @@ export const MoleculeSketcher2D: React.FC<MoleculeSketcher2DProps> = ({
 
           <button
             type="button"
-            onClick={() => setTool('erase')}
+            onClick={() => selectShapeOrUtilityTool('erase')}
             aria-label="Erase Atom or Bond"
-            aria-pressed={tool === 'erase'}
+            aria-pressed={!showPeriodicTable && tool === 'erase'}
             title="Eraser — Click atom or bond to delete"
             className={`w-8 h-8 rounded-md flex items-center justify-center transition-colors cursor-pointer ${
-              tool === 'erase'
+              !showPeriodicTable && tool === 'erase'
                 ? 'bg-rose-600 text-white shadow-xs'
                 : 'text-rose-600 hover:bg-rose-50'
             }`}
@@ -1791,8 +1918,15 @@ export const MoleculeSketcher2D: React.FC<MoleculeSketcher2DProps> = ({
           </button>
         </div>
 
-        {/* Pure White ChemDraw Publication Drafting Sheet */}
+        {/* Pure White ChemDraw Publication Drafting Sheet + Periodic Table Drawer */}
         <div className="relative flex-1 bg-white overflow-hidden">
+          {showPeriodicTable && (
+            <PeriodicTablePicker
+              activeElement={activeElement}
+              onSelectElement={handleSelectElement}
+              onClose={() => setShowPeriodicTable(false)}
+            />
+          )}
           <svg
             ref={svgRef}
             tabIndex={0}
@@ -2168,8 +2302,7 @@ export const MoleculeSketcher2D: React.FC<MoleculeSketcher2DProps> = ({
                   ? `${charge}+`
                   : `${Math.abs(charge)}−`;
 
-              const fillColor =
-                CHEMDRAW_ATOM_COLOR[atom.element] ?? '#0F172A';
+              const fillColor = getChemDrawTextColor(atom.element);
 
               return (
                 <g

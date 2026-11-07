@@ -7,6 +7,7 @@ import {
   generate3DCoordinates,
   parseSmilesToMolecule,
 } from './chemistry';
+import { ELEMENTS, PERIODIC_TABLE_LIST } from './elements';
 import { buildPresetMolecule, PRESET_MOLECULES } from './presets';
 import type { MoleculeGraph } from './types';
 
@@ -103,3 +104,37 @@ test('3D coordinate generator creates finite non-planar 3D coordinates and reali
   const collapsed = collapseHydrogens(relaxed);
   assert.equal(collapsed.atoms.length, 3);
 });
+
+test('Periodic Table contains all 118 IUPAC elements with unique atomic numbers, grid coordinates, and valid metal/noble-gas valences', () => {
+  assert.equal(PERIODIC_TABLE_LIST.length, 118);
+  assert.equal(Object.keys(ELEMENTS).length, 118);
+
+  const seenZ = new Set<number>();
+  const seenCoords = new Set<string>();
+  for (let i = 0; i < PERIODIC_TABLE_LIST.length; i++) {
+    const el = PERIODIC_TABLE_LIST[i];
+    assert.equal(el.atomicNumber, i + 1);
+    assert.ok(!seenZ.has(el.atomicNumber));
+    seenZ.add(el.atomicNumber);
+
+    const coordKey = `${el.gridRow}:${el.gridCol}`;
+    assert.ok(
+      !seenCoords.has(coordKey),
+      `Duplicate Periodic Table coordinate ${coordKey} for ${el.symbol}`
+    );
+    seenCoords.add(coordKey);
+    assert.equal(ELEMENTS[el.symbol].name, el.name);
+  }
+
+  // Test organometallic / coordination complex (Cisplatin: [Pt](Cl)(Cl)([NH3])[NH3])
+  const cisplatin = parseSmilesToMolecule('[Pt](Cl)(Cl)([NH3])[NH3]', 'Cisplatin');
+  const metrics = computeMoleculeMetrics(cisplatin);
+  assert.equal(metrics.formula, 'H6Cl2N2Pt');
+  assert.equal(metrics.valenceValid, true);
+
+  // Test noble gas compound (Xenon tetrafluoride: [Xe](F)(F)(F)F)
+  const xef4 = parseSmilesToMolecule('[Xe](F)(F)(F)F', 'Xenon tetrafluoride');
+  const xeMetrics = computeMoleculeMetrics(xef4);
+  assert.equal(xeMetrics.formula, 'F4Xe');
+});
+

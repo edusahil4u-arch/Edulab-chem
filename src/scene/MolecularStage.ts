@@ -20,6 +20,9 @@ export interface StageOptions {
   stageTheme: StageTheme;
   selectedAtomId: string | null;
   hoveredAtomId: string | null;
+  selectedBondId: string | null;
+  hoveredBondId: string | null;
+  selectedLonePair: { atomId: string; lobeIndex: number } | null;
 }
 
 // Pre-allocated scratch math helpers (zero GC inside render loop)
@@ -53,6 +56,8 @@ interface AtomRig {
 interface BondRig {
   bond: BondEdge;
   group: THREE.Group;
+  hitProxy: THREE.Mesh;
+  selectionIndicator: THREE.Mesh;
 }
 
 export class MolecularStage {
@@ -66,10 +71,7 @@ export class MolecularStage {
   private envRenderTarget: THREE.WebGLRenderTarget;
 
   private rootGroup: THREE.Group;
-  private pedestalGroup: THREE.Group;
   private moleculeGroup: THREE.Group;
-  private floorMesh: THREE.Mesh;
-  private moleculeShadowDisc: THREE.Mesh;
   private hemiLight: THREE.HemisphereLight;
   private keyLight: THREE.DirectionalLight;
 
@@ -90,11 +92,16 @@ export class MolecularStage {
     stageTheme: 'light',
     selectedAtomId: null,
     hoveredAtomId: null,
+    selectedBondId: null,
+    hoveredBondId: null,
+    selectedLonePair: null,
   };
 
   private currentExploded = 1.0;
   private cameraTargetPos: THREE.Vector3 | null = null;
   private cameraTargetLook: THREE.Vector3 | null = null;
+  private currentPreset: CameraPreset = 'iso';
+  private userMovedCamera = false;
 
   private rafId = 0;
   private timeoutId = 0;
@@ -114,17 +121,26 @@ export class MolecularStage {
 
   private onSelectAtom?: (atomId: string | null) => void;
   private onHoverAtom?: (atomId: string | null) => void;
+  private onSelectBond?: (bondId: string | null) => void;
+  private onHoverBond?: (bondId: string | null) => void;
+  private onSelectLonePair?: (lp: { atomId: string; lobeIndex: number } | null) => void;
 
   constructor(
     container: HTMLElement,
     callbacks: {
       onSelectAtom?: (atomId: string | null) => void;
       onHoverAtom?: (atomId: string | null) => void;
+      onSelectBond?: (bondId: string | null) => void;
+      onHoverBond?: (bondId: string | null) => void;
+      onSelectLonePair?: (lp: { atomId: string; lobeIndex: number } | null) => void;
     }
   ) {
     this.container = container;
     this.onSelectAtom = callbacks.onSelectAtom;
     this.onHoverAtom = callbacks.onHoverAtom;
+    this.onSelectBond = callbacks.onSelectBond;
+    this.onHoverBond = callbacks.onHoverBond;
+    this.onSelectLonePair = callbacks.onSelectLonePair;
 
     // 1. Software WebGL Detection via GPU renderer string
     this.isSoftwareGl = (() => {
@@ -168,10 +184,9 @@ export class MolecularStage {
     this.renderer.domElement.setAttribute('data-testid', 'molecule-3d-canvas');
     container.appendChild(this.renderer.domElement);
 
-    // 2. Scene, Fog & Studio RoomEnvironment
+    // 2. Scene & Studio RoomEnvironment (structure-only canvas)
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0xeef3f8);
-    this.scene.fog = new THREE.FogExp2(0xeef3f8, 0.024);
+    this.scene.background = new THREE.Color(0xf3f6fa);
 
     const pmremGenerator = new THREE.PMREMGenerator(this.renderer);
     this.envRenderTarget = pmremGenerator.fromScene(
@@ -181,22 +196,37 @@ export class MolecularStage {
     this.scene.environment = this.envRenderTarget.texture;
     pmremGenerator.dispose();
 
-    // 3. Camera & OrbitControls
+    // 3. Camera & OrbitControls (unrestricted 360° orbit around structure)
     this.camera = new THREE.PerspectiveCamera(42, width / height, 0.1, 150);
-    this.camera.position.set(7.8, 5.1, 11.2);
+    this.camera.position.set(5.8, 2.9, 8.2);
 
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = !this.isSoftwareGl;
-    this.controls.dampingFactor = 0.06;
-    this.controls.minDistance = 2.4;
-    this.controls.maxDistance = 28;
-    this.controls.maxPolarAngle = Math.PI * 0.485;
-    this.controls.target.set(0, 1.85, 0);
+    this.controls.dampingFactor = 0.08;
+    this.controls.rotateSpeed = 0.85;
+    this.controls.zoomSpeed = 1.0;
+    this.controls.panSpeed = 0.85;
+    this.controls.minDistance = 2.2;
+    this.controls.maxDistance = 26;
+    this.controls.maxPolarAngle = Math.PI;
+    this.controls.target.set(0, 0, 0);
+
+    // Explicitly configure mouse and touch button bindings for standard and trackpad interactions
+    this.controls.mouseButtons = {
+      LEFT: THREE.MOUSE.ROTATE,
+      MIDDLE: THREE.MOUSE.DOLLY,
+      RIGHT: THREE.MOUSE.PAN,
+    };
+    this.controls.touches = {
+      ONE: THREE.TOUCH.ROTATE,
+      TWO: THREE.TOUCH.DOLLY_PAN,
+    };
 
     this.controls.addEventListener('start', () => {
       // Cancel any scripted camera transition immediately when user grabs camera
       this.cameraTargetPos = null;
       this.cameraTargetLook = null;
+      this.userMovedCamera = true;
     });
 
     this.controls.addEventListener('change', () => {
@@ -208,13 +238,13 @@ export class MolecularStage {
     // 4. Procedural Textures & Studio 3-Point + Softbox Lighting Rig
     this.textures = createProceduralTextures(this.renderer);
 
-    this.hemiLight = new THREE.HemisphereLight(0xe0f2fe, 0xcbd5e1, 0.72);
+    this.hemiLight = new THREE.HemisphereLight(0xe0f2fe, 0xcbd5e1, 0.78);
     this.hemiLight.position.set(0, 20, 0);
     this.scene.add(this.hemiLight);
 
     this.keyLight = new THREE.DirectionalLight(0xfff7ed, 1.85);
     this.keyLight.position.set(6.5, 11.5, 7.5);
-    this.keyLight.target.position.set(0, 2.0, 0);
+    this.keyLight.target.position.set(0, 0, 0);
     this.scene.add(this.keyLight.target);
     if (!this.isSoftwareGl) {
       this.keyLight.castShadow = true;
@@ -236,49 +266,24 @@ export class MolecularStage {
     rimLight.position.set(-7.0, 5.5, -6.5);
     this.scene.add(rimLight);
 
+    const bottomFillLight = new THREE.DirectionalLight(0xe2e8f0, 0.42);
+    bottomFillLight.position.set(0, -8.0, 4.0);
+    this.scene.add(bottomFillLight);
+
     if (!this.isSoftwareGl) {
       RectAreaLightUniformsLib.init();
       const softbox = new THREE.RectAreaLight(0xffffff, 2.2, 6, 3);
       softbox.position.set(-4.5, 6.5, 4.5);
-      softbox.lookAt(0, 2.3, 0);
+      softbox.lookAt(0, 0, 0);
       this.scene.add(softbox);
     }
 
-    // 5. Laboratory Floor & Composite 8-Part Optical Spectrometer Pedestal
+    // 5. Pure Molecular Assembly Root (no pedestal plate or floor plane)
     this.rootGroup = new THREE.Group();
     this.scene.add(this.rootGroup);
 
-    const floorGeo = new THREE.PlaneGeometry(80, 80, 1, 1);
-    const floorMat = new THREE.MeshStandardMaterial({
-      color: 0xffffff,
-      map: this.textures.labFloorMap,
-      roughness: 0.78,
-      metalness: 0.05,
-    });
-    this.floorMesh = new THREE.Mesh(floorGeo, floorMat);
-    this.floorMesh.rotation.x = -Math.PI / 2;
-    this.floorMesh.position.y = 0;
-    this.floorMesh.receiveShadow = !this.isSoftwareGl;
-    this.rootGroup.add(this.floorMesh);
-
-    this.pedestalGroup = this.buildSpectrometerPedestal();
-    this.rootGroup.add(this.pedestalGroup);
-
-    // Soft radial contact shadow directly beneath molecule above the optical platen
-    const molShadowGeo = new THREE.CircleGeometry(2.35, 40);
-    const molShadowMat = new THREE.MeshBasicMaterial({
-      map: this.textures.contactShadowMap,
-      transparent: true,
-      depthWrite: false,
-      opacity: 0.42,
-    });
-    this.moleculeShadowDisc = new THREE.Mesh(molShadowGeo, molShadowMat);
-    this.moleculeShadowDisc.rotation.x = -Math.PI / 2;
-    this.moleculeShadowDisc.position.y = 0.575; // +0.015 above platen top (0.56)
-    this.rootGroup.add(this.moleculeShadowDisc);
-
     this.moleculeGroup = new THREE.Group();
-    this.moleculeGroup.position.set(0, 2.05, 0);
+    this.moleculeGroup.position.set(0, 0, 0);
     this.rootGroup.add(this.moleculeGroup);
 
     // Layer 1 is dedicated to fast raycasting against atom hit proxies
@@ -293,183 +298,52 @@ export class MolecularStage {
     this.requestRender();
   }
 
+
   /**
-   * Builds a composite 8-part procedural optical spectrometer pedestal grounded at y = 0.
+   * Computes camera distance so the entire molecule bounding sphere fits cleanly
+   * inside both vertical and narrow horizontal viewport bounds.
    */
-  private buildSpectrometerPedestal(): THREE.Group {
-    const group = new THREE.Group();
-
-    // Part 0: Ground contact shadow disc under pedestal (y = 0.012)
-    const baseShadowGeo = new THREE.CircleGeometry(3.45, 48);
-    const baseShadowMat = new THREE.MeshBasicMaterial({
-      map: this.textures.contactShadowMap,
-      transparent: true,
-      depthWrite: false,
-      opacity: 0.46,
-    });
-    const baseShadow = new THREE.Mesh(baseShadowGeo, baseShadowMat);
-    baseShadow.rotation.x = -Math.PI / 2;
-    baseShadow.position.y = 0.012;
-    group.add(baseShadow);
-
-    // Materials with >= 0.25 roughness contrast & varied metalness
-    const anodizedChassisMat = new THREE.MeshStandardMaterial({
-      color: 0x334155,
-      metalness: 0.85,
-      roughness: 0.28,
-      roughnessMap: this.textures.brushedRoughnessMap,
-    });
-    const darkTrimMat = new THREE.MeshStandardMaterial({
-      color: 0x0f172a,
-      metalness: 0.4,
-      roughness: 0.62,
-    });
-    const brassMat = new THREE.MeshStandardMaterial({
-      color: 0xd97706,
-      metalness: 0.92,
-      roughness: 0.18,
-    });
-    const emitterMat = new THREE.MeshStandardMaterial({
-      color: 0x0ea5e9,
-      emissive: 0x0284c7,
-      emissiveIntensity: 0.85,
-      roughness: 0.2,
-      metalness: 0.1,
-    });
-
-    // Part 1: Stepped beveled anodized chassis via LatheGeometry (y = 0.08 to 0.52)
-    const lathePoints = [
-      new THREE.Vector2(0.0, 0.08),
-      new THREE.Vector2(2.95, 0.08),
-      new THREE.Vector2(3.02, 0.14),
-      new THREE.Vector2(2.92, 0.26),
-      new THREE.Vector2(2.68, 0.34),
-      new THREE.Vector2(2.62, 0.48),
-      new THREE.Vector2(2.45, 0.52),
-      new THREE.Vector2(0.0, 0.52),
-    ];
-    const chassisGeo = new THREE.LatheGeometry(lathePoints, 64);
-    const chassisMesh = new THREE.Mesh(chassisGeo, anodizedChassisMat);
-    chassisMesh.castShadow = !this.isSoftwareGl;
-    chassisMesh.receiveShadow = !this.isSoftwareGl;
-    group.add(chassisMesh);
-
-    // Part 2: Calibrated goniometer degree dial ring (y = 0.525, polygonOffset to prevent Z-fighting)
-    const dialGeo = new THREE.RingGeometry(1.92, 2.58, 64);
-    const dialMat = new THREE.MeshStandardMaterial({
-      map: this.textures.goniometerDialMap,
-      roughness: 0.45,
-      metalness: 0.25,
-      polygonOffset: true,
-      polygonOffsetFactor: -1,
-      polygonOffsetUnits: -1,
-    });
-    const dialMesh = new THREE.Mesh(dialGeo, dialMat);
-    dialMesh.rotation.x = -Math.PI / 2;
-    dialMesh.position.y = 0.525;
-    dialMesh.receiveShadow = !this.isSoftwareGl;
-    group.add(dialMesh);
-
-    // Part 3: Recessed optical quartz specimen platen (y = 0.50 to 0.56)
-    const platenGeo = new THREE.CylinderGeometry(1.9, 1.9, 0.06, 48);
-    const platenMat = new THREE.MeshPhysicalMaterial({
-      color: 0xe0f2fe,
-      metalness: 0.05,
-      roughness: 0.08,
-      clearcoat: 1.0,
-      clearcoatRoughness: 0.06,
-      ior: 1.58,
-      transmission: this.isSoftwareGl ? 0 : 0.72,
-      transparent: true,
-      opacity: this.isSoftwareGl ? 0.42 : 0.92,
-    });
-    const platenMesh = new THREE.Mesh(platenGeo, platenMat);
-    platenMesh.position.y = 0.53;
-    platenMesh.receiveShadow = !this.isSoftwareGl;
-    group.add(platenMesh);
-
-    // Part 4: Interior spectrometer optical collimator well beneath platen
-    const wellGeo = new THREE.CylinderGeometry(1.45, 1.15, 0.14, 36);
-    const wellMesh = new THREE.Mesh(wellGeo, darkTrimMat);
-    wellMesh.position.y = 0.44;
-    group.add(wellMesh);
-
-    // Part 5: Equatorial precision calibration torus ring
-    const eqRingGeo = new THREE.TorusGeometry(2.65, 0.032, 16, 72);
-    const eqRingMesh = new THREE.Mesh(eqRingGeo, brassMat);
-    eqRingMesh.rotation.x = Math.PI / 2;
-    eqRingMesh.position.y = 0.48;
-    group.add(eqRingMesh);
-
-    // Part 6: Three machined brass vernier leveling feet (y = 0.0 to 0.12)
-    const footPoints = [
-      new THREE.Vector2(0.0, 0.0),
-      new THREE.Vector2(0.24, 0.0),
-      new THREE.Vector2(0.26, 0.03),
-      new THREE.Vector2(0.18, 0.06),
-      new THREE.Vector2(0.22, 0.1),
-      new THREE.Vector2(0.16, 0.14),
-      new THREE.Vector2(0.0, 0.14),
-    ];
-    const footGeo = new THREE.LatheGeometry(footPoints, 24);
-    for (let i = 0; i < 3; i++) {
-      const angle = (i * Math.PI * 2) / 3 + Math.PI / 6;
-      const foot = new THREE.Mesh(footGeo, brassMat);
-      foot.position.set(Math.cos(angle) * 2.58, 0, Math.sin(angle) * 2.58);
-      foot.castShadow = !this.isSoftwareGl;
-      group.add(foot);
+  private getOptimalViewDistance(): number {
+    let maxR = 2.2;
+    for (const rig of this.atomRigs.values()) {
+      const r = rig.targetPos.length() + rig.baseRadius * 1.35;
+      if (r > maxR) maxR = r;
     }
-
-    // Part 7 & 8: Four beveled cardinal alignment pylons (ExtrudeGeometry) + emitter slits
-    const pylonShape = new THREE.Shape();
-    pylonShape.moveTo(-0.14, 0);
-    pylonShape.lineTo(0.14, 0);
-    pylonShape.lineTo(0.1, 0.24);
-    pylonShape.lineTo(-0.1, 0.24);
-    pylonShape.closePath();
-
-    const pylonGeo = new THREE.ExtrudeGeometry(pylonShape, {
-      depth: 0.22,
-      bevelEnabled: true,
-      bevelThickness: 0.02,
-      bevelSize: 0.02,
-      bevelSegments: 2,
-    });
-    pylonGeo.center();
-
-    const slitGeo = new THREE.BoxGeometry(0.12, 0.025, 0.27);
-
-    for (let i = 0; i < 4; i++) {
-      const angle = (i * Math.PI) / 2;
-      const pylonGroup = new THREE.Group();
-      pylonGroup.position.set(
-        Math.cos(angle) * 2.66,
-        0.58,
-        Math.sin(angle) * 2.66
-      );
-      pylonGroup.rotation.y = -angle + Math.PI / 2;
-
-      const pylonMesh = new THREE.Mesh(pylonGeo, darkTrimMat);
-      pylonMesh.castShadow = !this.isSoftwareGl;
-      pylonGroup.add(pylonMesh);
-
-      const slitMesh = new THREE.Mesh(slitGeo, emitterMat);
-      slitMesh.position.y = 0.06;
-      pylonGroup.add(slitMesh);
-
-      group.add(pylonGroup);
-    }
-
-    return group;
+    const vFov = THREE.MathUtils.degToRad(this.camera.fov);
+    const aspect = Math.max(0.45, this.camera.aspect || 1);
+    const hFov = 2 * Math.atan(Math.tan(vFov * 0.5) * aspect);
+    const sinV = Math.sin(vFov * 0.5);
+    const sinH = Math.sin(hFov * 0.5);
+    return Math.max(maxR / sinV, maxR / sinH) * 1.12;
   }
 
-  /**
-   * Updates the 3D molecular assembly when the drawn 2D/3D graph changes.
-   */
+  private getPresetCameraPosition(preset: CameraPreset): THREE.Vector3 {
+    const dist = this.getOptimalViewDistance();
+    if (preset === 'top') {
+      return new THREE.Vector3(0.01, dist * 1.05, 0.01);
+    }
+    if (preset === 'front') {
+      return new THREE.Vector3(0, 0, dist * 1.02);
+    }
+    // Classic 3/4 isometric molecular view direction
+    const dir = new THREE.Vector3(0.55, 0.28, 0.787).normalize();
+    return dir.multiplyScalar(dist);
+  }
+
   public setMolecule(molecule: MoleculeGraph, metrics: MoleculeMetrics) {
+    const isNewMolecule = this.currentMolecule?.id !== molecule.id;
     this.currentMolecule = molecule;
     this.currentMetrics = metrics;
     this.rebuildMoleculeMeshes();
+    if (isNewMolecule) {
+      this.userMovedCamera = false;
+    }
+    if (!this.userMovedCamera) {
+      const pos = this.getPresetCameraPosition(this.currentPreset);
+      this.camera.position.copy(pos);
+      this.controls.target.set(0, -0.22, 0);
+      this.controls.update();
+    }
     this.requestRender();
   }
 
@@ -493,7 +367,7 @@ export class MolecularStage {
     ) {
       this.rebuildMoleculeMeshes();
     } else {
-      this.updateAtomHighlightStates();
+      this.updateHighlightStates();
     }
 
     const needsContinuous =
@@ -512,18 +386,13 @@ export class MolecularStage {
   }
 
   public setCameraPreset(preset: CameraPreset) {
-    const target = new THREE.Vector3(0, 1.85, 0);
-    if (preset === 'top') {
-      this.cameraTargetPos = new THREE.Vector3(0.01, 12.8, 0.01);
-    } else if (preset === 'front') {
-      this.cameraTargetPos = new THREE.Vector3(0, 2.35, 11.8);
-    } else {
-      // 'iso' or 'reset'
-      this.cameraTargetPos = new THREE.Vector3(7.8, 5.1, 11.2);
-      if (preset === 'reset') {
-        this.moleculeGroup.rotation.set(0, 0, 0);
-      }
+    this.currentPreset = preset === 'reset' ? 'iso' : preset;
+    this.userMovedCamera = false;
+    const target = new THREE.Vector3(0, -0.22, 0);
+    if (preset === 'reset') {
+      this.moleculeGroup.rotation.set(0, 0, 0);
     }
+    this.cameraTargetPos = this.getPresetCameraPosition(this.currentPreset);
     this.cameraTargetLook = target;
 
     if (this.isSoftwareGl) {
@@ -546,23 +415,34 @@ export class MolecularStage {
     return this.renderer.domElement.toDataURL('image/png');
   }
 
+  public exportImage(format: 'png' | 'jpeg' = 'png', quality = 0.95): string {
+    const prevBg = this.scene.background;
+    if (format === 'jpeg') {
+      this.scene.background = new THREE.Color(
+        this.options.stageTheme === 'dark' ? 0x0b1120 : 0xf3f6fa
+      );
+    }
+    this.controls.update();
+    this.renderer.render(this.scene, this.camera);
+    const mime = format === 'jpeg' ? 'image/jpeg' : 'image/png';
+    const dataUrl = this.renderer.domElement.toDataURL(mime, quality);
+    this.scene.background = prevBg;
+    return dataUrl;
+  }
+
   private applyStageTheme(theme: StageTheme) {
     if (theme === 'dark') {
       const bg = 0x0b1120;
       (this.scene.background as THREE.Color).setHex(bg);
-      (this.scene.fog as THREE.FogExp2).color.setHex(bg);
       this.hemiLight.color.setHex(0x93c5fd);
       this.hemiLight.groundColor.setHex(0x0f172a);
-      this.hemiLight.intensity = 0.62;
-      (this.floorMesh.material as THREE.MeshStandardMaterial).color.setHex(0x1e293b);
+      this.hemiLight.intensity = 0.72;
     } else {
-      const bg = 0xeef3f8;
+      const bg = 0xf3f6fa;
       (this.scene.background as THREE.Color).setHex(bg);
-      (this.scene.fog as THREE.FogExp2).color.setHex(bg);
       this.hemiLight.color.setHex(0xe0f2fe);
       this.hemiLight.groundColor.setHex(0xcbd5e1);
-      this.hemiLight.intensity = 0.72;
-      (this.floorMesh.material as THREE.MeshStandardMaterial).color.setHex(0xffffff);
+      this.hemiLight.intensity = 0.78;
     }
   }
 
@@ -637,6 +517,12 @@ export class MolecularStage {
     const reticleMat = new THREE.MeshBasicMaterial({
       color: 0x0284c7,
     });
+    const bondSelectMat = new THREE.MeshBasicMaterial({
+      color: 0x06b6d4,
+      transparent: true,
+      opacity: 0.55,
+      depthWrite: false,
+    });
     const lobeMat = new THREE.MeshPhysicalMaterial({
       color: 0x38bdf8,
       metalness: 0.05,
@@ -668,6 +554,7 @@ export class MolecularStage {
       collarMat,
       ferruleMat,
       reticleMat,
+      bondSelectMat,
       lobeMat,
       electronShellMat
     );
@@ -692,7 +579,6 @@ export class MolecularStage {
     };
 
     // Build Composite Multi-Part Atom Groups
-    let maxRadiusFromCenter = 1.2;
     for (const atom of mol.atoms) {
       const spec = ELEMENTS[atom.element] ?? ELEMENTS.C;
       const analysis = this.currentMetrics?.atomAnalyses[atom.id];
@@ -707,9 +593,6 @@ export class MolecularStage {
       const prev = prevPositions.get(atom.id);
       const currentPos = prev ? prev.clone() : targetPos.clone();
       group.position.copy(currentPos);
-
-      const distXZ = Math.hypot(atom.x3d, atom.z3d) + baseRadius;
-      if (distXZ > maxRadiusFromCenter) maxRadiusFromCenter = distXZ;
 
       // Part 1: Primary atomic shell
       const coreMesh = new THREE.Mesh(unitSphereGeo, getElementMat(atom.element));
@@ -752,6 +635,24 @@ export class MolecularStage {
             baseRadius * 0.65,
             Math.cos(angle) * baseRadius * 0.7
           );
+
+          // Dedicated hit proxy for lone pair on Layer 1
+          const lobeHitProxy = new THREE.Mesh(
+            unitSphereGeo,
+            new THREE.MeshBasicMaterial({ visible: false })
+          );
+          lobeHitProxy.scale.setScalar(0.42);
+          lobeHitProxy.position.set(0, 0.32, 0);
+          lobeHitProxy.layers.set(1);
+          lobeHitProxy.userData = {
+            type: 'lone_pair',
+            atomId: atom.id,
+            lobeIndex: lp,
+          };
+          lobe.add(lobeHitProxy);
+          this.hitTargets.push(lobeHitProxy);
+          this.disposableMaterials.push(lobeHitProxy.material as THREE.Material);
+
           lobeGroup.add(lobe);
         }
         group.add(lobeGroup);
@@ -774,7 +675,10 @@ export class MolecularStage {
       this.disposableMaterials.push(hitProxy.material as THREE.Material);
       hitProxy.scale.setScalar(Math.max(0.45, baseRadius * 1.25));
       hitProxy.layers.set(1);
-      hitProxy.userData.atomId = atom.id;
+      hitProxy.userData = {
+        type: 'atom',
+        atomId: atom.id,
+      };
       group.add(hitProxy);
       this.hitTargets.push(hitProxy);
 
@@ -872,26 +776,60 @@ export class MolecularStage {
         bondGroup.add(ring2);
       }
 
+      // Bond hit proxy on Layer 1 (for direct 3D bond selection)
+      const hitProxy = new THREE.Mesh(
+        unitCylGeo,
+        new THREE.MeshBasicMaterial({ visible: false })
+      );
+      hitProxy.layers.set(1);
+      hitProxy.userData = { type: 'bond', bondId: bond.id };
+      bondGroup.add(hitProxy);
+      this.hitTargets.push(hitProxy);
+      this.disposableMaterials.push(hitProxy.material as THREE.Material);
+
+      // Bond selection highlight sleeve
+      const selectionIndicator = new THREE.Mesh(unitCylGeo, bondSelectMat);
+      selectionIndicator.name = 'selectionIndicator';
+      selectionIndicator.visible = false;
+      bondGroup.add(selectionIndicator);
+
       bondGroup.visible = !isSpaceFilling;
       this.moleculeGroup.add(bondGroup);
-      this.bondRigs.push({ bond, group: bondGroup });
+      this.bondRigs.push({ bond, group: bondGroup, hitProxy, selectionIndicator });
     }
 
-    // Scale contact shadow disc beneath molecule to match molecular footprint
-    const shadowScale = Math.max(0.75, Math.min(1.5, maxRadiusFromCenter / 2.2));
-    this.moleculeShadowDisc.scale.setScalar(shadowScale);
-
-    this.updateAtomHighlightStates();
+    this.updateHighlightStates();
     this.updateBondTransforms();
   }
 
-  private updateAtomHighlightStates() {
+  private updateHighlightStates() {
     for (const [id, rig] of this.atomRigs.entries()) {
       const isSelected = id === this.options.selectedAtomId;
       const isHovered = id === this.options.hoveredAtomId;
       rig.reticleGroup.visible = isSelected || isHovered;
       const pulseScale = isSelected ? 1.12 : isHovered ? 1.05 : 1.0;
       rig.coreMesh.scale.setScalar(rig.baseRadius * pulseScale);
+
+      // Highlight selected lone pair lobe
+      if (rig.lobeGroup) {
+        rig.lobeGroup.children.forEach((child, idx) => {
+          if (child instanceof THREE.Mesh) {
+            const isLpSelected =
+              this.options.selectedLonePair?.atomId === id &&
+              this.options.selectedLonePair?.lobeIndex === idx;
+            child.scale.setScalar(isLpSelected ? 1.35 : 1.0);
+          }
+        });
+      }
+    }
+
+    for (const rig of this.bondRigs) {
+      const isSelected = rig.bond.id === this.options.selectedBondId;
+      const isHovered = rig.bond.id === this.options.hoveredBondId;
+      rig.selectionIndicator.visible = isSelected || isHovered;
+      if (rig.selectionIndicator.material instanceof THREE.MeshBasicMaterial) {
+        rig.selectionIndicator.material.opacity = isSelected ? 0.75 : 0.4;
+      }
     }
   }
 
@@ -987,23 +925,53 @@ export class MolecularStage {
           r2.position.set(0, halfLen * 0.35, 0);
         }
       }
+
+      // Update hit proxy and selection sleeve
+      const selIndicator = group.getObjectByName('selectionIndicator') as THREE.Mesh | undefined;
+      if (selIndicator) {
+        selIndicator.scale.set(stickRadius * 2.2, len * 0.98, stickRadius * 2.2);
+        selIndicator.position.set(0, 0, 0);
+      }
+      const bondHit = group.children.find(
+        (c) => c.userData?.type === 'bond'
+      ) as THREE.Mesh | undefined;
+      if (bondHit) {
+        bondHit.scale.set(Math.max(0.3, stickRadius * 3.2), len, Math.max(0.3, stickRadius * 3.2));
+        bondHit.position.set(0, 0, 0);
+      }
     }
   }
 
   private bindEvents() {
     const dom = this.renderer.domElement;
+    dom.style.touchAction = 'none';
 
     const onPointerDown = (e: PointerEvent) => {
       this.pointerDownClient.x = e.clientX;
       this.pointerDownClient.y = e.clientY;
+      if (dom.setPointerCapture) {
+        try {
+          dom.setPointerCapture(e.pointerId);
+        } catch {
+          // ignore pointer capture errors
+        }
+      }
     };
 
     const onPointerUp = (e: PointerEvent) => {
+      if (dom.releasePointerCapture) {
+        try {
+          dom.releasePointerCapture(e.pointerId);
+        } catch {
+          // ignore
+        }
+      }
+
       const dist = Math.hypot(
         e.clientX - this.pointerDownClient.x,
         e.clientY - this.pointerDownClient.y
       );
-      if (dist > 6) return; // User was orbiting, not clicking an atom
+      if (dist > 6) return; // User was orbiting, not clicking an atom or bond
 
       const rect = dom.getBoundingClientRect();
       this.pointerNdc.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
@@ -1011,10 +979,25 @@ export class MolecularStage {
       this.raycaster.setFromCamera(this.pointerNdc, this.camera);
       const hits = this.raycaster.intersectObjects(this.hitTargets, false);
       if (hits.length > 0) {
-        const atomId = hits[0].object.userData.atomId as string;
-        this.onSelectAtom?.(atomId);
+        const u = hits[0].object.userData;
+        if (u.type === 'bond') {
+          this.onSelectBond?.(u.bondId);
+          this.onSelectAtom?.(null);
+          this.onSelectLonePair?.(null);
+        } else if (u.type === 'lone_pair') {
+          this.onSelectLonePair?.({ atomId: u.atomId, lobeIndex: u.lobeIndex });
+          this.onSelectAtom?.(u.atomId);
+          this.onSelectBond?.(null);
+        } else {
+          const atomId = u.atomId as string;
+          this.onSelectAtom?.(atomId);
+          this.onSelectBond?.(null);
+          this.onSelectLonePair?.(null);
+        }
       } else {
         this.onSelectAtom?.(null);
+        this.onSelectBond?.(null);
+        this.onSelectLonePair?.(null);
       }
     };
 
@@ -1028,12 +1011,60 @@ export class MolecularStage {
       this.pointerNdc.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
       this.raycaster.setFromCamera(this.pointerNdc, this.camera);
       const hits = this.raycaster.intersectObjects(this.hitTargets, false);
-      const hitId =
-        hits.length > 0 ? (hits[0].object.userData.atomId as string) : null;
-      dom.style.cursor = hitId ? 'pointer' : 'grab';
-      if (hitId !== this.options.hoveredAtomId) {
-        this.onHoverAtom?.(hitId);
+      if (hits.length > 0) {
+        const u = hits[0].object.userData;
+        dom.style.cursor = 'pointer';
+        if (u.type === 'bond') {
+          if (u.bondId !== this.options.hoveredBondId) {
+            this.onHoverBond?.(u.bondId);
+            this.onHoverAtom?.(null);
+          }
+        } else if (u.type === 'lone_pair') {
+          if (u.atomId !== this.options.hoveredAtomId) {
+            this.onHoverAtom?.(u.atomId);
+            this.onHoverBond?.(null);
+          }
+        } else {
+          const atomId = u.atomId as string;
+          if (atomId !== this.options.hoveredAtomId) {
+            this.onHoverAtom?.(atomId);
+            this.onHoverBond?.(null);
+          }
+        }
+      } else {
+        dom.style.cursor = 'grab';
+        if (this.options.hoveredAtomId) this.onHoverAtom?.(null);
+        if (this.options.hoveredBondId) this.onHoverBond?.(null);
       }
+    };
+
+    /**
+     * Trackpad gestures:
+     * - Trackpad 2-finger scroll (wheel without Ctrl, or with Shift/Alt): smoothly rotates the 3D structure!
+     * - Trackpad pinch (wheel with Ctrl, which browsers dispatch for pinch-zoom): smoothly zooms in/out!
+     */
+    const onWheel = (e: WheelEvent) => {
+      // If user pinches on trackpad (Ctrl key set by browser) or uses Cmd/Meta, let OrbitControls handle zoom
+      if (e.ctrlKey || e.metaKey) {
+        return;
+      }
+
+      // Trackpad two-finger scroll -> 3D camera orbit rotation
+      e.preventDefault();
+      e.stopPropagation();
+
+      this.cameraTargetPos = null;
+      this.cameraTargetLook = null;
+      this.userMovedCamera = true;
+
+      const sensitivity = 0.0035;
+      const deltaX = e.deltaX || 0;
+      const deltaY = e.deltaY || 0;
+
+      // Rotate camera left/right around Y axis and up/down around pitch axis
+      this.controls.rotateLeft(deltaX * sensitivity);
+      this.controls.rotateUp(deltaY * sensitivity);
+      this.requestRender();
     };
 
     const onResize = () => {
@@ -1048,6 +1079,10 @@ export class MolecularStage {
       this.camera.aspect = w / h;
       this.camera.updateProjectionMatrix();
       this.renderer.setSize(w, h);
+      if (!this.userMovedCamera && this.atomRigs.size > 0) {
+        this.camera.position.copy(this.getPresetCameraPosition(this.currentPreset));
+        this.controls.target.set(0, -0.22, 0);
+      }
       this.controls.update();
       this.renderer.render(this.scene, this.camera);
       this.requestRender();
@@ -1056,6 +1091,7 @@ export class MolecularStage {
     dom.addEventListener('pointerdown', onPointerDown);
     dom.addEventListener('pointerup', onPointerUp);
     dom.addEventListener('pointermove', onPointerMove);
+    dom.addEventListener('wheel', onWheel, { passive: false });
     window.addEventListener('resize', onResize);
 
     const resizeObserver = new ResizeObserver(onResize);
@@ -1065,6 +1101,7 @@ export class MolecularStage {
       dom.removeEventListener('pointerdown', onPointerDown);
       dom.removeEventListener('pointerup', onPointerUp);
       dom.removeEventListener('pointermove', onPointerMove);
+      dom.removeEventListener('wheel', onWheel);
       window.removeEventListener('resize', onResize);
       resizeObserver.disconnect();
     };
